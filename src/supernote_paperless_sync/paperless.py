@@ -86,8 +86,9 @@ class PaperlessClient:
 
     async def _wait_for_task(self, task_id: str, timeout: int = 180) -> int:
         """Poll the tasks endpoint until the document is processed."""
-        deadline = asyncio.get_event_loop().time() + timeout
-        while asyncio.get_event_loop().time() < deadline:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
             await asyncio.sleep(2)
             resp = await self._client.get(
                 self._url("/api/tasks/"),
