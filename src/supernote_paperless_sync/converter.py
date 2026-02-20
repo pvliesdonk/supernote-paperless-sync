@@ -63,19 +63,48 @@ def _convert_with_supernotelib(note_path: Path) -> bytes:
 
     Uses raster mode (default) which works on all device types without
     requiring the potrace/cairo system libraries.
+
+    Important: we iterate pages individually instead of passing page_number=-1
+    to PdfConverter.convert(), because -1 triggers ProcessPoolExecutor which
+    forks child processes and corrupts asyncio's event loop state.
     """
+    import io
+
     import supernotelib as sn
-    from supernotelib.converter import PdfConverter
+    from supernotelib.converter import ImageConverter
+    from reportlab.lib.utils import ImageReader
+    from reportlab.pdfgen import canvas
 
     t0 = time.monotonic()
     with note_path.open("rb") as fh:
         notebook = sn.load(fh)
-    pdf_bytes: bytes = PdfConverter(notebook).convert(-1)  # -1 = all pages
+
+    total = notebook.get_total_pages()
+    img_converter = ImageConverter(notebook)
+
+    buf = io.BytesIO()
+    c = None
+    for i in range(total):
+        img = img_converter.convert(i)
+        if img is None:
+            continue
+        w, h = img.size
+        if c is None:
+            c = canvas.Canvas(buf, pagesize=(w, h))
+        else:
+            c.setPageSize((w, h))
+        c.drawImage(ImageReader(img), 0, 0, w, h)
+        c.showPage()
+
+    if c is not None:
+        c.save()
+
+    pdf_bytes = buf.getvalue()
     elapsed = time.monotonic() - t0
     log.debug(
         "supernotelib_converted",
         note=note_path.name,
-        pages=notebook.get_total_pages(),
+        pages=total,
         elapsed_s=round(elapsed, 2),
     )
     return pdf_bytes

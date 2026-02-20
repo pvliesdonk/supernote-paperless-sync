@@ -1,12 +1,18 @@
-"""Outbound sync: export tagged Paperless documents to Supernote Document folder."""
+"""Outbound pipeline: sync Paperless documents tagged 'send-to-supernote' to Supernote.
+
+Polls Paperless on an interval.  Downloads and writes to Document/Paperless/.
+If the tag is removed, the file is deleted from Supernote.
+
+All Paperless API calls are sync (httpx.Client) and run inside asyncio.to_thread()
+to keep the event loop free without touching asyncio internals from the thread.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from pathlib import Path
-
-import structlog
 
 from .config import Settings
 from .db import (
@@ -15,151 +21,145 @@ from .db import (
     record_export,
     remove_export_record,
 )
-from .paperless import PaperlessClient, PaperlessError
+from .paperless import PaperlessClient
 
-log = structlog.get_logger()
+log = logging.getLogger(__name__)
 
 _INVALID_CHARS = '<>:"/\\|?*'
 
 
 def _safe_filename(title: str, ext: str) -> str:
-    """
-    Convert a Paperless document title to a safe filename for the Supernote.
-
-    Args:
-        title: Raw document title from Paperless.
-        ext: File extension including the leading dot (e.g. '.pdf').
-
-    Returns:
-        A filename safe for FAT/exFAT filesystems used by Supernote.
-    """
-    stem = title
+    """Convert a Paperless document title to a safe filename."""
     for ch in _INVALID_CHARS:
-        stem = stem.replace(ch, "_")
-    # Collapse multiple underscores, strip leading/trailing whitespace/dots
-    stem = stem.strip(" .")[:180]
-    return f"{stem}{ext}"
+        title = title.replace(ch, "_")
+    title = title.strip()[:180]
+    return f"{title}{ext}"
 
 
-async def _export_document(
+def _export_document_sync(
     doc: dict,
     settings: Settings,
     client: PaperlessClient,
 ) -> None:
-    """Download a Paperless document and write it to the Supernote Document folder."""
+    """Download one document from Paperless and write to Supernote (sync)."""
     doc_id: int = doc["id"]
     title: str = doc.get("title") or f"document_{doc_id}"
 
-    try:
-        content, original_filename = await client.download_document(doc_id)
-    except PaperlessError as exc:
-        log.error("download_failed", doc_id=doc_id, error=str(exc))
-        return
+    content, original_filename = client.download_document(doc_id)
 
-    ext = Path(original_filename).suffix or ".pdf"
+    ext = Path(original_filename).suffix if original_filename else ".pdf"
     filename = _safe_filename(title, ext)
 
     dest_dir = settings.supernote_doc_dir / settings.outbound_subfolder
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = dest_dir / filename
 
-    # Handle filename collision by appending the doc ID
+    dest_path = dest_dir / filename
+    # Handle collision: append doc_id to stem
     if dest_path.exists():
-        stem = Path(filename).stem
-        filename = f"{stem}_{doc_id}{ext}"
-        dest_path = dest_dir / filename
+        stem = dest_path.stem
+        dest_path = dest_dir / f"{stem}_{doc_id}{ext}"
 
     dest_path.write_bytes(content)
-
     checksum = hashlib.sha256(content).hexdigest()[:16]
+
     record_export(settings.state_db, doc_id, str(dest_path), checksum)
-    log.info("document_exported", doc_id=doc_id, title=title, filename=filename)
+    log.info("exported_document doc_id=%d path=%s", doc_id, dest_path.name)
 
 
-async def _remove_document(doc_id: int, settings: Settings) -> None:
-    """
-    Delete an exported document from Supernote when its tag was removed.
-
-    Safety: only deletes files that live inside the managed subfolder.
-    """
+def _remove_document_sync(doc_id: int, settings: Settings) -> None:
+    """Delete a previously exported document from Supernote (sync)."""
     path_str = get_exported_path(settings.state_db, doc_id)
     if not path_str:
         remove_export_record(settings.state_db, doc_id)
         return
 
     path = Path(path_str)
-    managed_dir = settings.supernote_doc_dir / settings.outbound_subfolder
 
-    # Guard: refuse to delete files outside the managed subfolder
+    # Safety: only delete files inside the managed subfolder
+    managed_dir = settings.supernote_doc_dir / settings.outbound_subfolder
     try:
         path.relative_to(managed_dir)
     except ValueError:
         log.warning(
-            "remove_outside_managed_dir",
-            doc_id=doc_id,
-            path=path_str,
-            managed=str(managed_dir),
+            "remove_skipped_unsafe doc_id=%d path=%s not_under=%s",
+            doc_id,
+            path,
+            managed_dir,
         )
         remove_export_record(settings.state_db, doc_id)
         return
 
     if path.exists():
         path.unlink()
-        log.info("document_removed", doc_id=doc_id, path=path.name)
+        log.info("removed_document doc_id=%d path=%s", doc_id, path.name)
     else:
-        log.warning("remove_file_not_found", doc_id=doc_id, path=path_str)
+        log.warning("remove_missing doc_id=%d path=%s", doc_id, path)
 
     remove_export_record(settings.state_db, doc_id)
 
 
-async def _sync_once(
-    tag_id: int,
+def _sync_once(
     settings: Settings,
     client: PaperlessClient,
-) -> None:
-    """Run one outbound sync cycle."""
-    try:
-        tagged_docs = await client.list_documents_by_tag(tag_id)
-    except PaperlessError as exc:
-        log.error("list_tagged_failed", error=str(exc))
-        return
+    tag_id: int,
+) -> tuple[int, int]:
+    """One outbound sync pass: export new docs, remove stale ones (sync).
 
+    Returns (exported_count, removed_count).
+    """
+    tagged_docs = client.list_documents_by_tag(tag_id)
     tagged_ids = {doc["id"] for doc in tagged_docs}
     exported_ids = get_exported_doc_ids(settings.state_db)
 
-    new_ids = tagged_ids - exported_ids
-    stale_ids = exported_ids - tagged_ids
+    exported = 0
+    removed = 0
 
-    if new_ids:
-        log.info("outbound_new_docs", count=len(new_ids))
-    if stale_ids:
-        log.info("outbound_stale_docs", count=len(stale_ids))
+    for doc in tagged_docs:
+        if doc["id"] not in exported_ids:
+            try:
+                _export_document_sync(doc, settings, client)
+                exported += 1
+            except Exception as exc:
+                log.error(
+                    "export_failed doc_id=%d error=%s", doc["id"], exc, exc_info=True
+                )
 
-    # Export new documents
-    doc_map = {doc["id"]: doc for doc in tagged_docs}
-    for doc_id in new_ids:
-        await _export_document(doc_map[doc_id], settings, client)
+    for doc_id in exported_ids:
+        if doc_id not in tagged_ids:
+            try:
+                _remove_document_sync(doc_id, settings)
+                removed += 1
+            except Exception as exc:
+                log.error(
+                    "remove_failed doc_id=%d error=%s", doc_id, exc, exc_info=True
+                )
 
-    # Remove documents whose tag was removed
-    for doc_id in stale_ids:
-        await _remove_document(doc_id, settings)
+    return exported, removed
 
 
 async def run_outbound_sync(settings: Settings, client: PaperlessClient) -> None:
-    """
-    Main outbound loop.
-
-    1. Resolve the outbound tag ID (fails loudly if the tag doesn't exist).
-    2. Poll Paperless every poll_interval seconds, syncing tagged documents.
-    """
-    tag_id = await client.get_tag_id(settings.outbound_tag)
+    """Main outbound coroutine: polls Paperless every poll_interval seconds."""
+    tag_id = client.get_tag_id(settings.outbound_tag)
     if tag_id is None:
         raise RuntimeError(
-            f"Outbound tag '{settings.outbound_tag}' not found in Paperless. "
-            "Create it in the Paperless UI before starting."
+            f"Outbound tag '{settings.outbound_tag}' not found in Paperless — create it first"
         )
-    log.info("outbound_tag_resolved", tag=settings.outbound_tag, id=tag_id)
+
+    log.info(
+        "outbound_sync_started tag=%s id=%d interval=%ds",
+        settings.outbound_tag,
+        tag_id,
+        settings.poll_interval,
+    )
 
     while True:
-        await _sync_once(tag_id, settings, client)
+        try:
+            exported, removed = await asyncio.to_thread(
+                _sync_once, settings, client, tag_id
+            )
+            if exported or removed:
+                log.info("outbound_sync_done exported=%d removed=%d", exported, removed)
+        except Exception as exc:
+            log.error("outbound_sync_error error=%s", exc, exc_info=True)
+
         await asyncio.sleep(settings.poll_interval)

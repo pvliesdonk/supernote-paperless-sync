@@ -1,12 +1,15 @@
-"""Entry point for supernote-paperless-sync."""
+"""Entry point for supernote-paperless-sync.
+
+Runs two concurrent loops:
+  - inbound: watches Supernote Note/ for .note files → Paperless
+  - outbound: polls Paperless for 'send-to-supernote' tagged docs → Supernote
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import sys
-
-import structlog
 
 from .config import Settings
 from .db import init_db
@@ -16,57 +19,40 @@ from .paperless import PaperlessClient
 
 
 def _configure_logging(level: str) -> None:
-    log_level = getattr(logging, level.upper(), logging.INFO)
-
-    # Configure stdlib logging as the backend
     logging.basicConfig(
-        format="%(message)s",
-        stream=sys.stdout,
-        level=log_level,
-    )
-
-    structlog.configure(
-        processors=[
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.add_log_level,
-            structlog.processors.StackInfoRenderer(),
-            structlog.dev.ConsoleRenderer(),
-        ],
-        wrapper_class=structlog.make_filtering_bound_logger(log_level),
-        context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(),
+        format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+        level=getattr(logging, level.upper(), logging.INFO),
     )
 
 
 async def _main() -> None:
-    settings = Settings()  # type: ignore[call-arg]  # reads from env vars
+    settings = Settings()
     _configure_logging(settings.log_level)
 
-    log = structlog.get_logger()
+    log = logging.getLogger(__name__)
     log.info(
-        "supernote_paperless_sync_starting",
-        inbound_tag=settings.inbound_tag,
-        outbound_tag=settings.outbound_tag,
-        note_dir=str(settings.supernote_note_dir),
-        doc_dir=str(settings.supernote_doc_dir),
-        poll_interval=settings.poll_interval,
+        "starting inbound_tag=%s outbound_tag=%s poll_interval=%ds",
+        settings.inbound_tag,
+        settings.outbound_tag,
+        settings.poll_interval,
     )
 
     init_db(settings.state_db)
-    log.info("state_db_ready", path=str(settings.state_db))
 
+    # Sync client: safe to construct here, used only inside asyncio.to_thread()
     client = PaperlessClient(settings.paperless_url, settings.paperless_token)
+
     try:
         async with asyncio.TaskGroup() as tg:
             tg.create_task(run_inbound_watcher(settings, client), name="inbound")
             tg.create_task(run_outbound_sync(settings, client), name="outbound")
     except* RuntimeError as eg:
-        log = structlog.get_logger()
         for exc in eg.exceptions:
-            log.critical("startup_error", error=str(exc))
+            log.critical("startup_error error=%s", exc)
         sys.exit(1)
     finally:
-        await client.aclose()
+        client.close()
 
 
 def main() -> None:

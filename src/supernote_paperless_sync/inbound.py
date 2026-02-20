@@ -1,19 +1,60 @@
-"""Inbound sync: watch .note files and ingest them into Paperless-ngx."""
+"""Inbound pipeline: watch Supernote Note/ directory and ingest .note files into Paperless.
+
+The heavy work (conversion + HTTP upload) runs inside asyncio.to_thread() so
+the async event loop stays unblocked.  The sync PaperlessClient is safe to use
+there because supernotelib's multiprocessing imports can't corrupt the thread's
+own execution context.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 
-import structlog
-from watchfiles import Change, awatch
+from watchfiles import awatch, Change
 
 from .config import Settings
 from .converter import get_pdf_for_note
 from .db import get_ingested_mtime, record_ingestion
-from .paperless import PaperlessClient, PaperlessError
+from .paperless import PaperlessClient
 
-log = structlog.get_logger()
+log = logging.getLogger(__name__)
+
+
+def _ingest_note_sync(
+    note_path: Path,
+    settings: Settings,
+    client: PaperlessClient,
+    tag_id: int,
+) -> str:
+    """Convert a .note file and upload it to Paperless (fully synchronous).
+
+    Returns a status string: 'skipped', 'ingested', or 'updated'.
+    Runs inside asyncio.to_thread() — no async I/O allowed here.
+    """
+    mtime_ns = note_path.stat().st_mtime_ns
+    existing_mtime = get_ingested_mtime(settings.state_db, str(note_path))
+
+    if existing_mtime == mtime_ns:
+        return "skipped"
+
+    is_update = existing_mtime is not None
+    log.info("converting_note note=%s update=%s", note_path.name, is_update)
+
+    pdf_data = get_pdf_for_note(note_path, settings.notelib_convert_dir)
+
+    doc_id = client.upload_document(
+        pdf_data,
+        filename=f"{note_path.stem}.pdf",
+        tag_ids=[tag_id],
+    )
+
+    record_ingestion(settings.state_db, str(note_path), mtime_ns, doc_id)
+    log.info(
+        "ingested_note note=%s doc_id=%d update=%s", note_path.name, doc_id, is_update
+    )
+    return "updated" if is_update else "ingested"
 
 
 async def _process_note(
@@ -22,98 +63,47 @@ async def _process_note(
     client: PaperlessClient,
     tag_id: int,
 ) -> None:
-    """Convert a single .note file and upload it to Paperless if new or modified."""
+    """Process one .note file asynchronously (dispatches sync work to thread)."""
     try:
-        stat = note_path.stat()
-    except FileNotFoundError:
-        log.warning("note_disappeared", note=note_path.name)
-        return
-
-    mtime_ns = stat.st_mtime_ns
-    stored_mtime = get_ingested_mtime(settings.state_db, str(note_path))
-
-    if stored_mtime == mtime_ns:
-        log.debug("note_unchanged_skip", note=note_path.name)
-        return
-
-    is_update = stored_mtime is not None
-    log.info(
-        "processing_note",
-        note=note_path.name,
-        action="update" if is_update else "new",
-    )
-
-    # Conversion is CPU-bound — run in a thread pool to avoid blocking the loop
-    loop = asyncio.get_running_loop()
-    try:
-        pdf_data: bytes = await loop.run_in_executor(
-            None,
-            get_pdf_for_note,
-            note_path,
-            settings.notelib_convert_dir,
+        status = await asyncio.to_thread(
+            _ingest_note_sync, note_path, settings, client, tag_id
         )
-    except RuntimeError as exc:
-        log.error("conversion_failed", note=note_path.name, error=str(exc))
-        return
-
-    filename = f"{note_path.stem}.pdf"
-    try:
-        doc_id = await client.upload_document(pdf_data, filename, [tag_id])
-    except PaperlessError as exc:
-        log.error("upload_failed", note=note_path.name, error=str(exc))
-        return
-
-    record_ingestion(settings.state_db, str(note_path), mtime_ns, doc_id)
-    log.info(
-        "note_ingested",
-        note=note_path.name,
-        doc_id=doc_id,
-        action="update" if is_update else "new",
-    )
+        if status != "skipped":
+            log.info("process_note_done note=%s status=%s", note_path.name, status)
+    except Exception as exc:
+        log.error("ingest_failed note=%s error=%s", note_path.name, exc, exc_info=True)
 
 
 async def _scan_existing(
-    settings: Settings, client: PaperlessClient, tag_id: int
+    settings: Settings,
+    client: PaperlessClient,
+    tag_id: int,
 ) -> None:
-    """On startup, ingest any notes that were missed while the service was down."""
+    """Ingest any .note files that haven't been ingested yet (startup catch-up)."""
     note_dir = settings.supernote_note_dir
-    if not note_dir.is_dir():
-        log.warning("note_dir_missing", path=str(note_dir))
-        return
-
-    notes = sorted(note_dir.glob("*.note"))
-    if not notes:
-        log.info("no_notes_found", path=str(note_dir))
-        return
-
-    log.info("startup_scan", count=len(notes), path=str(note_dir))
+    notes = list(note_dir.glob("*.note"))
+    log.info("startup_scan count=%d", len(notes))
     for note_path in notes:
         await _process_note(note_path, settings, client, tag_id)
 
 
 async def run_inbound_watcher(settings: Settings, client: PaperlessClient) -> None:
-    """
-    Main inbound loop.
-
-    1. Resolve the inbound tag ID (fails loudly if the tag doesn't exist).
-    2. Scan for any notes missed while offline.
-    3. Watch for new / modified .note files continuously.
-    """
-    tag_id = await client.get_tag_id(settings.inbound_tag)
+    """Main inbound coroutine: resolves tag, scans existing notes, then watches for changes."""
+    tag_id = client.get_tag_id(settings.inbound_tag)
     if tag_id is None:
         raise RuntimeError(
-            f"Inbound tag '{settings.inbound_tag}' not found in Paperless. "
-            "Create it in the Paperless UI before starting."
+            f"Inbound tag '{settings.inbound_tag}' not found in Paperless — create it first"
         )
-    log.info("inbound_tag_resolved", tag=settings.inbound_tag, id=tag_id)
+
+    log.info("inbound_tag_resolved name=%s id=%d", settings.inbound_tag, tag_id)
 
     await _scan_existing(settings, client, tag_id)
 
-    log.info("watching_note_dir", path=str(settings.supernote_note_dir))
+    log.info("watching_notes directory=%s", settings.supernote_note_dir)
     async for changes in awatch(settings.supernote_note_dir):
         for change_type, path_str in changes:
             path = Path(path_str)
-            if path.suffix.lower() != ".note":
+            if path.suffix != ".note":
                 continue
             if change_type in (Change.added, Change.modified):
                 await _process_note(path, settings, client, tag_id)
