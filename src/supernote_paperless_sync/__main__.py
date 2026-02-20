@@ -17,12 +17,18 @@ from .paperless import PaperlessClient
 
 def _configure_logging(level: str) -> None:
     log_level = getattr(logging, level.upper(), logging.INFO)
+
+    # Configure stdlib logging as the backend
+    logging.basicConfig(
+        format="%(message)s",
+        stream=sys.stdout,
+        level=log_level,
+    )
+
     structlog.configure(
         processors=[
-            structlog.stdlib.filter_by_level,
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.add_log_level,
-            structlog.stdlib.add_logger_name,
             structlog.processors.StackInfoRenderer(),
             structlog.dev.ConsoleRenderer(),
         ],
