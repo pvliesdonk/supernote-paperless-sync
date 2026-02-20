@@ -68,13 +68,14 @@ def _convert_with_supernotelib(note_path: Path) -> bytes:
     from supernotelib.converter import PdfConverter
 
     t0 = time.monotonic()
-    notebook = sn.load(str(note_path))
+    with note_path.open("rb") as fh:
+        notebook = sn.load(fh)
     pdf_bytes: bytes = PdfConverter(notebook).convert(-1)  # -1 = all pages
     elapsed = time.monotonic() - t0
     log.debug(
         "supernotelib_converted",
         note=note_path.name,
-        pages=len(notebook.pages),
+        pages=notebook.get_total_pages(),
         elapsed_s=round(elapsed, 2),
     )
     return pdf_bytes
