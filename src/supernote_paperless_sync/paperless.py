@@ -56,15 +56,72 @@ class PaperlessClient:
     # Documents — upload
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Correspondents
+    # ------------------------------------------------------------------
+
+    def get_or_create_correspondent(self, name: str) -> int:
+        """Return the ID of correspondent *name*, creating it if absent."""
+        url = f"{self._base}/api/correspondents/"
+        while url:
+            resp = self._client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+            for item in data.get("results", []):
+                if item["name"] == name:
+                    return int(item["id"])
+            url = data.get("next")
+        resp = self._client.post(f"{self._base}/api/correspondents/", json={"name": name})
+        resp.raise_for_status()
+        created = resp.json()
+        log.info("created_correspondent name=%s id=%d", name, created["id"])
+        return int(created["id"])
+
+    # ------------------------------------------------------------------
+    # Document types
+    # ------------------------------------------------------------------
+
+    def get_or_create_document_type(self, name: str) -> int:
+        """Return the ID of document type *name*, creating it if absent."""
+        url = f"{self._base}/api/document_types/"
+        while url:
+            resp = self._client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+            for item in data.get("results", []):
+                if item["name"] == name:
+                    return int(item["id"])
+            url = data.get("next")
+        resp = self._client.post(f"{self._base}/api/document_types/", json={"name": name})
+        resp.raise_for_status()
+        created = resp.json()
+        log.info("created_document_type name=%s id=%d", name, created["id"])
+        return int(created["id"])
+
+    # ------------------------------------------------------------------
+    # Documents — upload
+    # ------------------------------------------------------------------
+
     def upload_document(
         self,
         pdf_data: bytes,
         filename: str,
         tag_ids: list[int],
+        correspondent_id: int | None = None,
+        document_type_id: int | None = None,
+        created_date: str | None = None,
     ) -> int:
         """Upload *pdf_data* to Paperless and return the new document ID.
 
         Blocks until the Paperless task queue confirms the document is created.
+
+        Args:
+            pdf_data: Raw PDF bytes.
+            filename: Filename for the uploaded document.
+            tag_ids: List of tag IDs to assign.
+            correspondent_id: Optional correspondent ID to assign.
+            document_type_id: Optional document type ID to assign.
+            created_date: Optional creation date as ``YYYY-MM-DD`` string.
         """
         # Build multipart manually: httpx requires all fields in `files` when
         # mixing file upload with repeated form fields (list[tuple] in data=
@@ -74,6 +131,12 @@ class PaperlessClient:
         ]
         for tid in tag_ids:
             multipart.append(("tags", (None, str(tid), "text/plain")))
+        if correspondent_id is not None:
+            multipart.append(("correspondent", (None, str(correspondent_id), "text/plain")))
+        if document_type_id is not None:
+            multipart.append(("document_type", (None, str(document_type_id), "text/plain")))
+        if created_date is not None:
+            multipart.append(("created", (None, created_date, "text/plain")))
         resp = self._client.post(
             f"{self._base}/api/documents/post_document/",
             files=multipart,  # type: ignore[arg-type]

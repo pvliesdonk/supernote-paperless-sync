@@ -29,6 +29,16 @@ class Settings(BaseSettings):
         description="Path to notelib convert/ output directory"
     )
 
+    # Metadata applied to ingested notes
+    inbound_correspondent: str | None = Field(
+        default=None,
+        description="Correspondent name to assign to ingested notes (created if absent)",
+    )
+    inbound_document_type: str | None = Field(
+        default=None,
+        description="Document type name to assign to ingested notes (created if absent)",
+    )
+
     # Tag names (must already exist in Paperless)
     inbound_tag: str = Field(
         default="paperless-gpt-ocr-auto",
