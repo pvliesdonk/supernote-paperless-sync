@@ -9,10 +9,11 @@ _SCHEMA = """
 PRAGMA journal_mode=WAL;
 
 CREATE TABLE IF NOT EXISTS ingested_notes (
-    note_path  TEXT    NOT NULL PRIMARY KEY,
-    mtime_ns   INTEGER NOT NULL,
-    doc_id     INTEGER,
-    ingested_at TEXT   NOT NULL DEFAULT (datetime('now'))
+    note_path    TEXT    NOT NULL PRIMARY KEY,
+    mtime_ns     INTEGER NOT NULL,
+    doc_id       INTEGER,
+    content_hash TEXT,
+    ingested_at  TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS exported_docs (
@@ -29,6 +30,15 @@ def init_db(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with _connect(db_path) as conn:
         conn.executescript(_SCHEMA)
+        # Migrate existing DBs: add content_hash column if absent
+        cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(ingested_notes)").fetchall()
+        }
+        if "content_hash" not in cols:
+            conn.execute(
+                "ALTER TABLE ingested_notes ADD COLUMN content_hash TEXT"
+            )
 
 
 @contextmanager
@@ -60,21 +70,46 @@ def get_ingested_mtime(db_path: Path, note_path: str) -> int | None:
     return row["mtime_ns"] if row else None
 
 
+def get_ingested_hash(db_path: Path, note_path: str) -> str | None:
+    """Return the stored content_hash for a note, or None if not yet ingested."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT content_hash FROM ingested_notes WHERE note_path = ?",
+            (note_path,),
+        ).fetchone()
+    return row["content_hash"] if row else None
+
+
+def get_ingested_doc_id(db_path: Path, note_path: str) -> int | None:
+    """Return the stored doc_id for a note, or None if not yet ingested."""
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT doc_id FROM ingested_notes WHERE note_path = ?",
+            (note_path,),
+        ).fetchone()
+    return row["doc_id"] if row else None
+
+
 def record_ingestion(
-    db_path: Path, note_path: str, mtime_ns: int, doc_id: int | None
+    db_path: Path,
+    note_path: str,
+    mtime_ns: int,
+    doc_id: int | None,
+    content_hash: str | None = None,
 ) -> None:
     """Upsert an ingested-note record."""
     with _connect(db_path) as conn:
         conn.execute(
             """
-            INSERT INTO ingested_notes (note_path, mtime_ns, doc_id, ingested_at)
-            VALUES (?, ?, ?, datetime('now'))
+            INSERT INTO ingested_notes (note_path, mtime_ns, doc_id, content_hash, ingested_at)
+            VALUES (?, ?, ?, ?, datetime('now'))
             ON CONFLICT(note_path) DO UPDATE SET
-                mtime_ns   = excluded.mtime_ns,
-                doc_id     = excluded.doc_id,
-                ingested_at = excluded.ingested_at
+                mtime_ns     = excluded.mtime_ns,
+                doc_id       = excluded.doc_id,
+                content_hash = excluded.content_hash,
+                ingested_at  = excluded.ingested_at
             """,
-            (note_path, mtime_ns, doc_id),
+            (note_path, mtime_ns, doc_id, content_hash),
         )
 
 

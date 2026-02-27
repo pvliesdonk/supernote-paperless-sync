@@ -52,6 +52,35 @@ class PaperlessClient:
             url = data.get("next")
         return None
 
+    def get_or_create_tag(self, name: str) -> int:
+        """Return the ID of tag *name*, creating it if absent."""
+        tag_id = self.get_tag_id(name)
+        if tag_id is not None:
+            return tag_id
+        resp = self._client.post(f"{self._base}/api/tags/", json={"name": name})
+        resp.raise_for_status()
+        created = resp.json()
+        log.info("created_tag name=%s id=%d", name, created["id"])
+        return int(created["id"])
+
+    # ------------------------------------------------------------------
+    # Documents — get and patch
+    # ------------------------------------------------------------------
+
+    def get_document(self, doc_id: int) -> dict:
+        """Fetch document metadata from ``GET /api/documents/{doc_id}/``."""
+        resp = self._client.get(f"{self._base}/api/documents/{doc_id}/")
+        resp.raise_for_status()
+        return resp.json()
+
+    def patch_document(self, doc_id: int, fields: dict) -> dict:
+        """Update document fields via ``PATCH /api/documents/{doc_id}/``."""
+        resp = self._client.patch(
+            f"{self._base}/api/documents/{doc_id}/", json=fields
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     # ------------------------------------------------------------------
     # Documents — upload
     # ------------------------------------------------------------------

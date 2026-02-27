@@ -30,19 +30,30 @@ class Settings(BaseSettings):
     )
 
     # Metadata applied to ingested notes
-    inbound_correspondent: str | None = Field(
+    inbound_correspondent_override: str | None = Field(
         default=None,
-        description="Correspondent name to assign to ingested notes (created if absent)",
+        description=(
+            "Override correspondent name for ingested notes. "
+            "If blank, derived from the account directory in the note path."
+        ),
     )
     inbound_document_type: str | None = Field(
         default=None,
         description="Document type name to assign to ingested notes (created if absent)",
     )
 
-    # Tag names (must already exist in Paperless)
+    # Tag names
     inbound_tag: str = Field(
         default="paperless-gpt-ocr-auto",
         description="Tag applied to notes ingested from Supernote",
+    )
+    inbound_completion_tag: str = Field(
+        default="supernote-ingested",
+        description="Tag applied after our own OCR/metadata pipeline completes",
+    )
+    superseded_tag: str = Field(
+        default="superseded",
+        description="Tag applied to old document version when a note is updated",
     )
     outbound_tag: str = Field(
         default="send-to-supernote",
@@ -51,6 +62,18 @@ class Settings(BaseSettings):
     outbound_subfolder: str = Field(
         default="Paperless",
         description="Subfolder inside Document/ where exported files are stored",
+    )
+
+    # LLM (OpenAI-compatible) for OCR and metadata
+    openai_base_url: str = Field(description="LiteLLM / OpenAI-compatible gateway URL")
+    openai_api_key: str = Field(description="API key for the LLM gateway")
+    vision_llm_model: str = Field(
+        default="gpt-4o",
+        description="Model used for vision-based handwriting OCR",
+    )
+    llm_model: str = Field(
+        default="gpt-4o-mini",
+        description="Model used for metadata suggestion (title, tags)",
     )
 
     # Behavior
