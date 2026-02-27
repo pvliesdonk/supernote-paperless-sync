@@ -51,13 +51,6 @@ class Settings(BaseSettings):
         default="supernote-ingested",
         description="Tag applied after our own OCR/metadata pipeline completes",
     )
-    ocr_complete_tag: str = Field(
-        default="docling-md",
-        description=(
-            "Tag that signals OCR is already done (paperless-gpt's PDF_OCR_COMPLETE_TAG). "
-            "Added at upload time so paperless-gpt skips these documents."
-        ),
-    )
     superseded_tag: str = Field(
         default="superseded",
         description="Tag applied to old document version when a note is updated",
@@ -69,6 +62,12 @@ class Settings(BaseSettings):
     outbound_subfolder: str = Field(
         default="Paperless",
         description="Subfolder inside Document/ where exported files are stored",
+    )
+
+    # Custom field names
+    summary_field_name: str = Field(
+        default="Summary",
+        description="Name of the Paperless custom field that stores the document summary",
     )
 
     # LLM (OpenAI-compatible) for OCR and metadata

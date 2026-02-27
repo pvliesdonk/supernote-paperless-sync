@@ -125,6 +125,46 @@ def suggest_metadata(
     return {"title": str(title), "tags": [str(t) for t in tags]}
 
 
+_SUMMARY_SYSTEM = (
+    "You are a document summarization assistant. "
+    "Given a document's transcribed text and its title, write a concise summary "
+    "that captures the key points, important details, dates, and named entities. "
+    "Be concise — aim for a few sentences to a short paragraph. "
+    "Output only the summary text — no commentary, no headers."
+)
+
+
+def summarize_text(ocr_text: str, title: str, client: OpenAI, model: str) -> str:
+    """Generate a concise summary of a document's OCR text.
+
+    Args:
+        ocr_text: Full transcribed text of the document.
+        title: Document title (used for context in the prompt).
+        client: Configured OpenAI client.
+        model: Model name for summarization.
+
+    Returns:
+        Summary string. Returns an empty string if ocr_text is blank or
+        if the LLM call fails.
+    """
+    if not ocr_text or not ocr_text.strip():
+        return ""
+    prompt = f'Document title: "{title}"\n\nContent:\n{ocr_text[:8000]}'
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": _SUMMARY_SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception:
+        log.warning("summarize_text_failed title=%r", title, exc_info=True)
+        return ""
+
+
 def embed_text_layer(pdf_bytes: bytes, text: str) -> bytes:
     """Insert an invisible text overlay into a PDF for searchability.
 

@@ -64,6 +64,39 @@ class PaperlessClient:
         return int(created["id"])
 
     # ------------------------------------------------------------------
+    # Custom fields
+    # ------------------------------------------------------------------
+
+    def get_or_create_custom_field(self, name: str, data_type: str = "string") -> int:
+        """Return the ID of a custom field, creating it if absent.
+
+        Args:
+            name: Field name as shown in Paperless UI.
+            data_type: Paperless data type string (e.g. ``"string"``, ``"url"``,
+                ``"date"``, ``"integer"``, ``"float"``, ``"boolean"``).
+
+        Returns:
+            Custom field ID.
+        """
+        url: str | None = f"{self._base}/api/custom_fields/"
+        while url:
+            resp = self._client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+            for field in data.get("results", []):
+                if field["name"].lower() == name.lower():
+                    return int(field["id"])
+            url = data.get("next")
+        resp = self._client.post(
+            f"{self._base}/api/custom_fields/",
+            json={"name": name, "data_type": data_type},
+        )
+        resp.raise_for_status()
+        created = resp.json()
+        log.info("created_custom_field name=%s id=%d", name, created["id"])
+        return int(created["id"])
+
+    # ------------------------------------------------------------------
     # Documents — get and patch
     # ------------------------------------------------------------------
 
