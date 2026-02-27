@@ -51,6 +51,13 @@ class Settings(BaseSettings):
         default="supernote-ingested",
         description="Tag applied after our own OCR/metadata pipeline completes",
     )
+    ocr_complete_tag: str = Field(
+        default="docling-md",
+        description=(
+            "Tag that signals OCR is already done (paperless-gpt's PDF_OCR_COMPLETE_TAG). "
+            "Added at upload time so paperless-gpt skips these documents."
+        ),
+    )
     superseded_tag: str = Field(
         default="superseded",
         description="Tag applied to old document version when a note is updated",

@@ -84,6 +84,7 @@ def _ingest_note_sync(
     inbound_tag_id: int,
     completion_tag_id: int,
     superseded_tag_id: int,
+    ocr_complete_tag_id: int,
     document_type_id: int | None,
 ) -> str:
     """Convert a .note file and upload it to Paperless (fully synchronous).
@@ -133,12 +134,11 @@ def _ingest_note_sync(
     pdf_with_text = embed_text_layer(pdf_bytes, ocr_text)
 
     # --- Resolve tag IDs ---
-    # Do NOT include inbound_tag (e.g. paperless-gpt-ocr-auto) in the upload —
-    # that would trigger the paperless-gpt → docling-md pipeline which would
-    # overwrite our OCR content with base64 image markdown.
-    # We only apply the completion tag + LLM-suggested tags.
+    # Include ocr_complete_tag (paperless-gpt's PDF_OCR_COMPLETE_TAG, e.g. "docling-md")
+    # so paperless-gpt sees OCR as already done and skips these documents entirely.
+    # Do NOT include inbound_tag (paperless-gpt-ocr-auto) — that would re-trigger the pipeline.
     suggested_tag_ids = [client.get_or_create_tag(t) for t in suggested_tag_names]
-    upload_tag_ids = list({completion_tag_id, *suggested_tag_ids})
+    upload_tag_ids = list({completion_tag_id, ocr_complete_tag_id, *suggested_tag_ids})
 
     # --- Derive correspondent ---
     correspondent_name = _derive_correspondent(
@@ -196,6 +196,7 @@ async def _process_note(
     inbound_tag_id: int,
     completion_tag_id: int,
     superseded_tag_id: int,
+    ocr_complete_tag_id: int,
     document_type_id: int | None,
 ) -> None:
     """Process one .note file asynchronously (dispatches sync work to thread)."""
@@ -209,6 +210,7 @@ async def _process_note(
             inbound_tag_id,
             completion_tag_id,
             superseded_tag_id,
+            ocr_complete_tag_id,
             document_type_id,
         )
         if status != "skipped":
@@ -224,6 +226,7 @@ async def _scan_existing(
     inbound_tag_id: int,
     completion_tag_id: int,
     superseded_tag_id: int,
+    ocr_complete_tag_id: int,
     document_type_id: int | None,
 ) -> None:
     """Ingest any .note files that haven't been ingested yet (startup catch-up)."""
@@ -239,6 +242,7 @@ async def _scan_existing(
             inbound_tag_id,
             completion_tag_id,
             superseded_tag_id,
+            ocr_complete_tag_id,
             document_type_id,
         )
 
@@ -271,6 +275,13 @@ async def run_inbound_watcher(settings: Settings, client: PaperlessClient) -> No
         superseded_tag_id,
     )
 
+    ocr_complete_tag_id = client.get_or_create_tag(settings.ocr_complete_tag)
+    log.info(
+        "ocr_complete_tag_resolved name=%s id=%d",
+        settings.ocr_complete_tag,
+        ocr_complete_tag_id,
+    )
+
     document_type_id: int | None = None
     if settings.inbound_document_type:
         document_type_id = client.get_or_create_document_type(
@@ -289,6 +300,7 @@ async def run_inbound_watcher(settings: Settings, client: PaperlessClient) -> No
         inbound_tag_id,
         completion_tag_id,
         superseded_tag_id,
+        ocr_complete_tag_id,
         document_type_id,
     )
 
@@ -307,5 +319,6 @@ async def run_inbound_watcher(settings: Settings, client: PaperlessClient) -> No
                     inbound_tag_id,
                     completion_tag_id,
                     superseded_tag_id,
+                    ocr_complete_tag_id,
                     document_type_id,
                 )
