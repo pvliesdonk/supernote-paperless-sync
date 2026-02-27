@@ -133,8 +133,12 @@ def _ingest_note_sync(
     pdf_with_text = embed_text_layer(pdf_bytes, ocr_text)
 
     # --- Resolve tag IDs ---
+    # Do NOT include inbound_tag (e.g. paperless-gpt-ocr-auto) in the upload —
+    # that would trigger the paperless-gpt → docling-md pipeline which would
+    # overwrite our OCR content with base64 image markdown.
+    # We only apply the completion tag + LLM-suggested tags.
     suggested_tag_ids = [client.get_or_create_tag(t) for t in suggested_tag_names]
-    upload_tag_ids = list({inbound_tag_id, completion_tag_id, *suggested_tag_ids})
+    upload_tag_ids = list({completion_tag_id, *suggested_tag_ids})
 
     # --- Derive correspondent ---
     correspondent_name = _derive_correspondent(
