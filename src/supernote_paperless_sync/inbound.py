@@ -160,8 +160,18 @@ def _ingest_note_sync(
         created_date=created_date,
     )
 
-    # --- Patch content, title, and summary custom field ---
-    patch_fields: dict = {"content": ocr_text, "title": suggested_title}
+    # --- Patch content, title, metadata, and summary custom field ---
+    # Also re-assert correspondent, document_type, and created here because
+    # Paperless's classifier runs asynchronously after post_document and may
+    # override the values we submitted at upload time.
+    patch_fields: dict = {
+        "content": ocr_text,
+        "title": suggested_title,
+        "created": created_date,
+        "correspondent": correspondent_id,
+    }
+    if document_type_id is not None:
+        patch_fields["document_type"] = document_type_id
     if summary:
         patch_fields["custom_fields"] = [
             {"field": summary_field_id, "value": summary}
