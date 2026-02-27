@@ -67,7 +67,7 @@ class PaperlessClient:
     # Custom fields
     # ------------------------------------------------------------------
 
-    def get_or_create_custom_field(self, name: str, data_type: str = "string") -> int:
+    def get_or_create_custom_field(self, name: str, data_type: str = "longtext") -> int:
         """Return the ID of a custom field, creating it if absent.
 
         Args:
@@ -111,6 +111,13 @@ class PaperlessClient:
         resp = self._client.patch(
             f"{self._base}/api/documents/{doc_id}/", json=fields
         )
+        if not resp.is_success:
+            log.error(
+                "patch_document_failed doc_id=%d status=%d body=%s",
+                doc_id,
+                resp.status_code,
+                resp.text[:500],
+            )
         resp.raise_for_status()
         return resp.json()
 
